@@ -98,10 +98,7 @@ class DocumentLoader:
         
         for filename in os.listdir(directory_path):
             file_path = os.path.join(directory_path, filename)
-            print(filename)
             if filename.lower().endswith('.pdf'):
-                print("here pdf")
-                print(file_path)
                 all_documents.extend(self.load_pdf(file_path))
             elif filename.lower().endswith('.docx'):
                 all_documents.extend(self.load_docx(file_path))
