@@ -1,484 +1,413 @@
 import os
-
-# เพิ่มการตั้งค่า environment variable ที่ตอนเริ่มต้น
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import chromadb
 from chromadb.config import Settings as ChromaSettings
 from sentence_transformers import SentenceTransformer, CrossEncoder
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional
 from langchain.schema import Document
 import uuid
 from pythainlp import word_tokenize
 import re
 from pythainlp.util import normalize
-import numpy as np
 from collections import Counter
 import math
-# from openai import OpenAI
 
 class VectorStore:
     def __init__(self, db_path: str, embedding_model: str):
+        # --- ใช้ Chroma เป็น cosine space เพื่อเข้าคู่กับ normalized embeddings ---
         self.client = chromadb.PersistentClient(
             path=db_path,
-            settings=ChromaSettings(anonymized_telemetry=False)
+            settings=ChromaSettings(anonymized_telemetry=False),
         )
-        self.embedding_model = SentenceTransformer(embedding_model, trust_remote_code=True)
-        self.rerank_model = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
         self.collection_name = "documents"
         self.collection = self.client.get_or_create_collection(
-            name=self.collection_name
+            name=self.collection_name,
+            metadata={"hnsw:space": "cosine"}  # <<< สำคัญ
         )
-        
-        # เก็บ document frequency สำหรับ TF-IDF
-        self.doc_freq = {}
+
+        # --- โมเดลฝั่ง embedding: Jina v3 ---
+        # แนะนำให้ส่งค่า embedding_model = "jinaai/jina-embeddings-v3"
+        self.embedding_model_id = embedding_model or "jinaai/jina-embeddings-v3"
+        self.embedding_model = SentenceTransformer(
+            self.embedding_model_id,
+            trust_remote_code=True
+        )
+
+        # --- Cross-encoder reranker (เดิม) ---
+        self.rerank_model = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
+
+        # สถิติเพื่อ TF-IDF (เดิม)
+        self.doc_freq: Dict[str, int] = {}
         self.total_docs = 0
-        
-        # Thai stop words
+
+        # Thai stopwords (เดิม)
         self.thai_stopwords = {
-            'และ', 'หรือ', 'แต่', 'ที่', 'ใน', 'จาก', 'ของ', 'เป็น', 'มี', 'จะ', 'ได้', 'แล้ว', 
+            'และ', 'หรือ', 'แต่', 'ที่', 'ใน', 'จาก', 'ของ', 'เป็น', 'มี', 'จะ', 'ได้', 'แล้ว',
             'กับ', 'ไป', 'มา', 'ให้', 'ถึง', 'คือ', 'อะไร', 'ไหม', 'มั้ย', 'นะ', 'ครับ', 'ค่ะ',
             'เอ่อ', 'อื่ม', 'อา', 'เออ', 'โอ้', 'อ๋อ', 'เฮ้ย', 'นั่น', 'นี่', 'โน่น', 'เหล่า',
             'ผู้', 'คน', 'บุคคล', 'ตัว', 'อัน', 'สิ่ง', 'การ', 'ความ', 'เรื่อง'
         }
 
+    # -------------------- Utils (เหมือนเดิม + เล็กน้อย) --------------------
     def normalize_thai(self, text: str) -> str:
-        text = normalize(text)              # Normalize วรรณยุกต์และสระ
-        text = re.sub(r"\s+", " ", text)     # ลบช่องว่างเกิน
+        text = normalize(text)
+        text = re.sub(r"\s+", " ", text)
         return text.strip()
 
     def tokenize_thai(self, text: str) -> str:
         tokens = word_tokenize(text, engine="newmm")
         return " ".join(tokens)
-    
+
     def extract_keywords(self, text: str, top_k: int = 10) -> List[str]:
-        """ดึงคำสำคัญจากข้อความ"""
-        # Tokenize และกรอง stop words
         tokens = word_tokenize(text, engine="newmm")
-        filtered_tokens = [
-            token.lower() for token in tokens 
-            if len(token) > 1 and token.lower() not in self.thai_stopwords
-            and not re.match(r'^[0-9\s\.\,\!\?\-\(\)]+$', token)
+        filtered = [
+            t.lower() for t in tokens
+            if len(t) > 1 and t.lower() not in self.thai_stopwords
+            and not re.match(r'^[0-9\s\.\,\!\?\-\(\)]+$', t)
         ]
-        
-        # นับความถี่
-        token_freq = Counter(filtered_tokens)
-        return [token for token, freq in token_freq.most_common(top_k)]
-    
-    def calculate_tfidf_score(self, query_tokens: List[str], doc_content: str) -> float:
-        """คำนวณ TF-IDF score"""
-        if self.total_docs == 0 or not query_tokens:
-            return 0.0
-            
-        doc_tokens = word_tokenize(doc_content.lower(), engine="newmm")
-        if not doc_tokens:
-            return 0.0
-            
-        doc_token_freq = Counter(doc_tokens)
-        
-        tfidf_score = 0
-        for token in query_tokens:
-            # TF (Term Frequency)
-            tf = doc_token_freq.get(token, 0) / len(doc_tokens)
-            
-            if tf == 0:  # ถ้าไม่มี token นี้ในเอกสาร ข้ามไป
-                continue
-            
-            # IDF (Inverse Document Frequency)
-            df = self.doc_freq.get(token, 1)
-            
-            # ป้องกัน math domain error
-            if df > 0 and self.total_docs > 0 and self.total_docs >= df:
-                idf = math.log((self.total_docs + 1) / (df + 1))  # เพิ่ม 1 เพื่อป้องกัน log(0)
-            else:
-                idf = 0.0
-            
-            tfidf_score += tf * idf
-        
-        return tfidf_score
-    
+        return [tok for tok, _ in Counter(filtered).most_common(top_k)]
+
     def build_document_frequency(self, documents: List[Document]):
-        """สร้าง document frequency สำหรับ TF-IDF"""
         self.doc_freq.clear()
         self.total_docs = len(documents)
-        
         if self.total_docs == 0:
             return
-        
         for doc in documents:
-            if not doc.page_content:  # ตรวจสอบเอกสารว่าง
+            if not getattr(doc, "page_content", None):
                 continue
-                
-            tokens = set(word_tokenize(doc.page_content.lower(), engine="newmm"))
-            for token in tokens:
-                if len(token) > 1 and token not in self.thai_stopwords:
-                    self.doc_freq[token] = self.doc_freq.get(token, 0) + 1
-        
-        # ตรวจสอบผลลัพธ์
+            toks = set(word_tokenize(doc.page_content.lower(), engine="newmm"))
+            for t in toks:
+                if len(t) > 1 and t not in self.thai_stopwords:
+                    self.doc_freq[t] = self.doc_freq.get(t, 0) + 1
         print(f"Built document frequency for {self.total_docs} documents, {len(self.doc_freq)} unique tokens")
-    
-    def _clean_metadata(self, metadata: Dict[str, Any]) -> Dict[str, Any]:
-        """ทำความสะอาด metadata ให้เป็น type ที่ ChromaDB รองรับ"""
-        cleaned = {}
-        
-        for key, value in metadata.items():
-            if value is None:
-                cleaned[key] = None
-            elif isinstance(value, (str, int, float, bool)):
-                cleaned[key] = value
-            elif isinstance(value, list):
-                # แปลง list เป็น string
-                cleaned[key] = ', '.join(str(item) for item in value)
-            elif isinstance(value, dict):
-                # แปลง dict เป็น string
-                cleaned[key] = str(value)
-            else:
-                # แปลง type อื่นๆ เป็น string
-                cleaned[key] = str(value)
-        
-        return cleaned
-    
-    def _parse_keywords_from_metadata(self, metadata: Dict[str, Any]) -> List[str]:
-        """ดึง keywords กลับมาจาก metadata"""
-        if 'keywords' in metadata and metadata['keywords']:
-            return [kw.strip() for kw in metadata['keywords'].split(',') if kw.strip()]
-        return []
-    
-    def add_documents(self, documents: List[Document]):
-        """Add documents to vector store with enhanced processing"""
-        # สร้าง document frequency
-        self.build_document_frequency(documents)
-        
-        texts = [doc.page_content for doc in documents]
-        metadatas = [doc.metadata for doc in documents]
-        
-        # Generate embeddings with enhanced preprocessing
-        processed_texts = []
-        enhanced_metadatas = []
-        
-        for i, (text, metadata) in enumerate(zip(texts, metadatas)):
-            # ปรับปรุงข้อความ
-            norm = self.normalize_thai(text)
-            tokenized = self.tokenize_thai(norm)
-            processed_texts.append(tokenized)
-            
-            # เพิ่มข้อมูล metadata
-            enhanced_metadata = metadata.copy()
-            
-            # แปลง keywords เป็น string เพื่อให้ ChromaDB รองรับ
-            keywords = self.extract_keywords(text)
-            enhanced_metadata['keywords'] = ', '.join(keywords) if keywords else ""
-            enhanced_metadata['keywords_list'] = str(keywords)  # เก็บเป็น string representation
-            enhanced_metadata['word_count'] = len(word_tokenize(text, engine="newmm"))
-            enhanced_metadata['char_count'] = len(text)
-            
-            # ตรวจสอบและแปลงค่าใน metadata ให้เป็น type ที่ ChromaDB รองรับ
-            cleaned_metadata = self._clean_metadata(enhanced_metadata)
-            enhanced_metadatas.append(cleaned_metadata)
 
-        task = "retrieval.query"
-        embeddings = self.embedding_model.encode(processed_texts, task=task, prompt_name=task).tolist()
-        
-        # Generate IDs
-        ids = [str(uuid.uuid4()) for _ in range(len(processed_texts))]
-        
-        # Add to collection
+    def calculate_tfidf_score(self, query_tokens: List[str], doc_content: str) -> float:
+        if self.total_docs == 0 or not query_tokens:
+            return 0.0
+        dtoks = word_tokenize(doc_content.lower(), engine="newmm")
+        if not dtoks:
+            return 0.0
+        dfreq = Counter(dtoks)
+        score = 0.0
+        for tok in query_tokens:
+            tf = dfreq.get(tok, 0) / len(dtoks)
+            if tf == 0: 
+                continue
+            df = self.doc_freq.get(tok, 1)
+            idf = math.log((self.total_docs + 1) / (df + 1)) if df > 0 else 0.0
+            score += tf * idf
+        return score
+
+    # -------------------- NEW: ตัวช่วย encode แบบฉลาด --------------------
+    def _encode_texts(self, texts: List[str], is_query: bool) -> List[List[float]]:
+        """
+        พยายามใช้พารามิเตอร์ที่เหมาะกับ Instruct-embeddings เช่น Jina v3:
+        - query:  task='retrieval.query' / prompt_name='retrieval.query'
+        - passage: task='retrieval.passage' / prompt_name='retrieval.passage'
+        ถ้าไม่รองรับ → fallback เป็น encode ปกติ
+        """
+        name = "retrieval.query" if is_query else "retrieval.passage"
+        # ลองแบบต่าง ๆ ตามลำดับ
+        trials = [
+            {"task": name, "normalize_embeddings": True},
+            {"prompt_name": name, "normalize_embeddings": True},
+            {"normalize_embeddings": True},
+        ]
+        for kw in trials:
+            try:
+                embs = self.embedding_model.encode(
+                    texts,
+                    batch_size=64,
+                    **kw
+                )
+                # sentence-transformers อาจคืนเป็น np.ndarray หรือ list
+                return embs.tolist() if hasattr(embs, "tolist") else embs
+            except TypeError:
+                # โมเดลไม่รับพารามิเตอร์นี้ → ลองแบบถัดไป
+                continue
+        # fallback สุดท้าย
+        embs = self.embedding_model.encode(texts, batch_size=64)
+        return embs.tolist() if hasattr(embs, "tolist") else embs
+
+    # -------------------- Ingest --------------------
+    def _clean_metadata(self, metadata: Dict[str, Any]) -> Dict[str, Any]:
+        cleaned = {}
+        for k, v in metadata.items():
+            if v is None or isinstance(v, (str, int, float, bool)):
+                cleaned[k] = v
+            elif isinstance(v, list):
+                cleaned[k] = ", ".join(str(x) for x in v)
+            elif isinstance(v, dict):
+                cleaned[k] = str(v)
+            else:
+                cleaned[k] = str(v)
+        return cleaned
+
+    def add_documents(self, documents: List[Document]):
+        """
+        แนะนำ chunk_size ≈ 900–1100 tokens, overlap ≈ 120–200 (คุณตั้ง 1000/200 ไว้แล้วดี)
+        เพิ่ม boost ด้วย title/section ในข้อความฝั่ง embeddings
+        """
+        if not documents:
+            return
+
+        self.build_document_frequency(documents)
+
+        texts: List[str] = []
+        embed_texts: List[str] = []
+        metadatas: List[Dict[str, Any]] = []
+
+        for i, doc in enumerate(documents):
+            raw = doc.page_content or ""
+            meta = dict(doc.metadata or {})
+
+            # --- ทำความสะอาด + tokenize ภาษาไทย ---
+            norm = self.normalize_thai(raw)
+            tokenized = self.tokenize_thai(norm)
+
+            # --- boost จาก title/section ---
+            title = (meta.get("title") or meta.get("file_name") or "").strip()
+            section = (meta.get("section") or meta.get("heading") or "").strip()
+            prefix = ""
+            if title:
+                prefix += f"[TITLE] {title}\n"
+            if section:
+                prefix += f"[SECTION] {section}\n"
+
+            embed_txt = (prefix + tokenized).strip()
+
+            texts.append(raw)
+            embed_texts.append(embed_txt)
+
+            # enrich metadata
+            enriched = meta.copy()
+            keywords = self.extract_keywords(raw)
+            enriched["keywords"] = ", ".join(keywords) if keywords else ""
+            enriched["word_count"] = len(word_tokenize(raw, engine="newmm"))
+            enriched["char_count"] = len(raw)
+            enriched["full_content"] = prefix + raw   # ✅ เก็บเนื้อหาจริง + title/section
+            metadatas.append(self._clean_metadata(enriched))
+
+
+        # --- สร้าง embeddings (passage mode + normalize) ---
+        embeddings = self._encode_texts(embed_texts, is_query=False)
+
+        ids = [str(uuid.uuid4()) for _ in range(len(texts))]
         self.collection.add(
             embeddings=embeddings,
-            documents=texts,
-            metadatas=enhanced_metadatas,
-            ids=ids
+            documents=texts,         # เก็บข้อความดิบ
+            metadatas=metadatas,
+            ids=ids,
         )
-        
-        print(f"Added {len(documents)} documents to vector store")
-    
-    def enhance_query(self, query: str) -> List[str]:
-        """ขยาย query ให้ครอบคลุมมากขึ้น"""
-        enhanced_queries = [query]
-        
-        # สร้าง query variants
-        variants = []
-        
-        # เพิ่มรูปแบบคำถาม
-        if not any(q_word in query for q_word in ['คือ', 'อะไร', 'ทำไม', 'อย่างไร', 'เมื่อไหร่', 'ที่ไหน']):
-            variants.extend([
-                f"คำตอบของ {query}",
-                f"ข้อมูลเกี่ยวกับ {query}",
-                f"รายละเอียดของ {query}",
-                f"การอธิบาย {query}"
-            ])
-        
-        # แทนที่คำพ้อง
-        synonyms = {
-            'วิธี': ['วิธีการ', 'ขั้นตอน', 'กระบวนการ'],
-            'ทำ': ['จัดทำ', 'สร้าง', 'ดำเนินการ'],
-            'ใช้': ['ใช้งาน', 'นำไปใช้', 'ประยุกต์ใช้'],
-            'คือ': ['หมายถึง', 'มีความหมายว่า', 'คือการ']
-        }
-        
-        for word, syns in synonyms.items():
-            if word in query:
-                for syn in syns:
-                    variants.append(query.replace(word, syn))
-        
-        # ดึงคำสำคัญ
-        keywords = self.extract_keywords(query, top_k=3)
-        if len(keywords) >= 2:
-            variants.append(' '.join(keywords))
-        
-        enhanced_queries.extend(variants)
-        return list(set(enhanced_queries))  # ลบซ้ำ
-    
-    def similarity_search(self, query: str, k: int = 5, use_enhanced: bool = True) -> List[Dict[str, Any]]:
-        """Enhanced similarity search with multiple techniques"""
-        
-        if use_enhanced:
-            return self._enhanced_similarity_search(query, k)
-        else:
-            return self._basic_similarity_search(query, k)
-    
-    def _basic_similarity_search(self, query: str, k: int) -> List[Dict[str, Any]]:
-        """Original similarity search method"""
-        task = "retrieval.query"
-        query_embedding = self.embedding_model.encode([query], task=task, prompt_name=task).tolist()
-        
-        results = self.collection.query(
+        print(f"Added {len(documents)} documents to vector store (model={self.embedding_model_id}, cosine+normalized)")
+
+    # -------------------- Retrieval (ใช้ query-mode + normalize) --------------------
+    def _query_collection(self, query_embedding, n_results: int):
+        return self.collection.query(
             query_embeddings=query_embedding,
-            n_results=k
+            n_results=n_results,
+            include=["documents", "metadatas", "distances"]
         )
-        
+
+    def _basic_similarity_search(self, query: str, k: int) -> List[Dict[str, Any]]:
+        q_emb = self._encode_texts([query], is_query=True)
+        results = self._query_collection(q_emb, n_results=k)
+
         candidate_docs = []
         for i in range(len(results['documents'][0])):
+            meta = results['metadatas'][0][i] or {}
+            candidate_text = meta.get("full_content") or results['documents'][0][i]
+
             candidate_docs.append({
-                'content': results['documents'][0][i],
-                'metadata': results['metadatas'][0][i],
-                'distance': results['distances'][0][i]
+                'content': candidate_text,
+                'metadata': meta,
+                'distance': results['distances'][0][i],
+                'id': results['ids'][0][i],
             })
 
-        pairs = [(query, doc['content']) for doc in candidate_docs]
-        rerank_scores = self.rerank_model.predict(pairs)
-        
-        reranked_results = sorted(
-            zip(candidate_docs, rerank_scores),
-            key=lambda x: x[1],
-            reverse=True
-        )
-        
-        final_results = []
-        for doc, score in reranked_results:
-            final_results.append({
-                'content': doc['content'],
-                'metadata': doc['metadata'],
-                'distance': doc['distance'],
-                'rerank_score': float(score)
-            })
-        
-        return final_results
-    
+        # rerank
+        pairs = [(query, d['content']) for d in candidate_docs]
+        rr = self.rerank_model.predict(pairs) if pairs else []
+        reranked = sorted(zip(candidate_docs, rr), key=lambda x: x[1], reverse=True)
+
+        return [{
+            **doc,
+            'rerank_score': float(score)
+        } for doc, score in reranked]
+
+
     def _enhanced_similarity_search(self, query: str, k: int) -> List[Dict[str, Any]]:
-        """Enhanced search with multiple techniques"""
-        
-        # 🔥 1. Query Enhancement
         enhanced_queries = self.enhance_query(query)
         query_tokens = self.extract_keywords(query)
-        
-        all_candidates = {}  # ใช้ dict เพื่อหลีกเลี่ยงซ้ำ
-        
-        # ค้นหาด้วย enhanced queries
-        for enhanced_query in enhanced_queries[:3]:  # จำกัดไว้ 3 queries
-            task = "retrieval.query"
-            query_embedding = self.embedding_model.encode([enhanced_query], task=task, prompt_name=task).tolist()
-            
-            results = self.collection.query(
-                query_embeddings=query_embedding,
-                n_results=min(k * 2, 15)  # เพิ่มตัวเลือก
-            )
-            
+
+        all_candidates: Dict[str, Dict[str, Any]] = {}
+        for eq in enhanced_queries[:3]:
+            q_emb = self._encode_texts([eq], is_query=True)
+            results = self._query_collection(q_emb, n_results=min(k * 2, 15))
             for i in range(len(results['documents'][0])):
                 doc_id = results['ids'][0][i]
+                meta = results['metadatas'][0][i] or {}
+                # ✅ ใช้ full_content ถ้ามี
+                candidate_text = meta.get("content") or results['documents'][0][i]
+
                 if doc_id not in all_candidates:
                     all_candidates[doc_id] = {
-                        'content': results['documents'][0][i],
-                        'metadata': results['metadatas'][0][i],
+                        'content': candidate_text,
+                        'metadata': meta,
                         'distance': results['distances'][0][i],
                         'doc_id': doc_id
                     }
-        
+
         candidates = list(all_candidates.values())
-        
-        # 🔥 2. Multi-Score Calculation
+
+        # semantic score
         enhanced_candidates = []
         for doc in candidates:
-            # Semantic similarity score (จาก distance)
-            semantic_score = max(0, 1 - doc['distance'])
-            
-            # TF-IDF score (ตรวจสอบก่อนคำนวณ)
-            tfidf_score = 0.0
-            if query_tokens and self.total_docs > 0:
-                try:
-                    tfidf_score = self.calculate_tfidf_score(query_tokens, doc['content'])
-                except Exception as e:
-                    print(f"Warning: TF-IDF calculation failed: {e}")
-                    tfidf_score = 0.0
-            
-            # Keyword matching score
+            semantic_score = max(0.0, 1.0 - float(doc['distance']))
+            tfidf_score = self.calculate_tfidf_score(query_tokens, doc['content']) if (query_tokens and self.total_docs > 0) else 0.0
+
             doc_keywords = set(self.extract_keywords(doc['content']))
-            query_keywords = set(query_tokens)
-            keyword_overlap = len(doc_keywords.intersection(query_keywords))
-            keyword_score = keyword_overlap / len(query_keywords) if query_keywords else 0
-            
-            # Metadata boost
-            metadata_score = 0
-            metadata = doc.get('metadata', {})
-            if 'source' in metadata and any(keyword in metadata['source'].lower() for keyword in query_tokens):
+            q_keywords = set(query_tokens)
+            keyword_overlap = len(doc_keywords & q_keywords)
+            keyword_score = (keyword_overlap / len(q_keywords)) if q_keywords else 0.0
+
+            metadata = doc.get('metadata', {}) or {}
+            metadata_score = 0.0
+            if 'source' in metadata and any(kw in str(metadata['source']).lower() for kw in query_tokens):
                 metadata_score += 0.1
-            
-            # ดึง keywords จาก metadata string
             if 'keywords' in metadata and metadata['keywords']:
-                meta_keywords = set([kw.lower().strip() for kw in metadata['keywords'].split(',') if kw.strip()])
-                meta_overlap = len(meta_keywords.intersection(set([kw.lower() for kw in query_tokens])))
-                metadata_score += meta_overlap * 0.05
-            
-            # Length penalty (เอกสารยาวเกินไปอาจไม่เฉพาะเจาะจง)
-            word_count = metadata.get('word_count', len(doc['content'].split()))
-            length_penalty = 1.0 if word_count < 500 else 0.9 if word_count < 1000 else 0.8
-            
+                meta_keywords = {kw.strip().lower() for kw in str(metadata['keywords']).split(',') if kw.strip()}
+                metadata_score += len(meta_keywords & {kw.lower() for kw in query_tokens}) * 0.05
+
+            wc = metadata.get('word_count', len(doc['content'].split()))
+            length_penalty = 1.0 if wc < 500 else 0.9 if wc < 1000 else 0.8
+
             enhanced_candidates.append({
-                'content': doc['content'],
-                'metadata': doc['metadata'],
-                'distance': doc['distance'],
+                **doc,
                 'semantic_score': semantic_score,
                 'tfidf_score': tfidf_score,
                 'keyword_score': keyword_score,
                 'metadata_score': metadata_score,
                 'length_penalty': length_penalty,
-                'doc_id': doc['doc_id']
             })
-        
-        # 🔥 3. Cross-Encoder Re-ranking with context
-        rerank_pairs = []
-        for doc in enhanced_candidates:
-            # เพิ่ม context จาก metadata
-            context = ""
-            if 'source' in doc['metadata']:
-                context += f"[{doc['metadata']['source']}] "
-            if 'section' in doc['metadata']:
-                context += f"หัวข้อ: {doc['metadata']['section']} "
-            
-            enhanced_content = f"{context}{doc['content']}"
-            rerank_pairs.append((query, enhanced_content))
-        
-        rerank_scores = self.rerank_model.predict(rerank_pairs) if rerank_pairs else []
-        
-        # 🔥 4. Score Fusion
+
+        # cross-encoder rerank (เพิ่ม context จาก metadata เหมือนเดิม)
+        pairs = []
+        for d in enhanced_candidates:
+            ctx = ""
+            if 'source' in d['metadata']: ctx += f"[{d['metadata']['source']}] "
+            if 'section' in d['metadata']: ctx += f"หัวข้อ: {d['metadata']['section']} "
+            pairs.append((query, f"{ctx}{d['content']}"))
+
+        rr = self.rerank_model.predict(pairs) if pairs else []
         final_candidates = []
-        for i, (doc, rerank_score) in enumerate(zip(enhanced_candidates, rerank_scores)):
-            # Weighted fusion
+        for d, r in zip(enhanced_candidates, rr):
             final_score = (
-                0.35 * float(rerank_score) +           # Cross-encoder score
-                0.25 * doc['semantic_score'] +         # Semantic similarity
-                0.20 * doc['tfidf_score'] +           # TF-IDF
-                0.10 * doc['keyword_score'] +         # Keyword matching
-                0.05 * doc['metadata_score'] +        # Metadata boost
-                0.05 * doc['length_penalty']          # Length penalty
+                0.35 * float(r) +
+                0.25 * d['semantic_score'] +
+                0.20 * d['tfidf_score'] +
+                0.10 * d['keyword_score'] +
+                0.05 * d['metadata_score'] +
+                0.05 * d['length_penalty']
             )
-            
-            final_candidates.append({
-                'content': doc['content'],
-                'metadata': doc['metadata'],
-                'distance': doc['distance'],
-                'rerank_score': float(rerank_score),
-                'semantic_score': doc['semantic_score'],
-                'tfidf_score': doc['tfidf_score'],
-                'keyword_score': doc['keyword_score'],
-                'metadata_score': doc['metadata_score'],
-                'final_score': final_score,
-                'doc_id': doc['doc_id']
-            })
-        
-        # 🔥 5. Diversity-aware ranking (MMR-like)
-        diverse_results = self._select_diverse_results(final_candidates, k, lambda_param=0.7)
-        
-        return diverse_results
+            final_candidates.append({**d, 'rerank_score': float(r), 'final_score': float(final_score)})
+
+        return self._select_diverse_results(final_candidates, k, lambda_param=0.7)
+
     
-    def _select_diverse_results(self, candidates: List[Dict], k: int, lambda_param: float = 0.7) -> List[Dict]:
-        """Select diverse results using MMR-like algorithm"""
+    # -------------------- Query expansion (restored) --------------------
+    def enhance_query(self, query: str) -> List[str]:
+        """
+        ขยาย query แบบเรียบง่ายเพื่อเพิ่ม recall:
+        - ถ้าไม่มีคำถามชัดเจน เติมรูปแบบถาม-ตอบ
+        - แทนคำพ้องบางคำ
+        - ดึงคีย์เวิร์ดหลัก (Thai) เพื่อสร้าง variant แบบสั้น
+        """
+        q = (query or "").strip()
+        variants: List[str] = [q]
+
+        # 1) เพิ่มรูปแบบถาม-ตอบ ถ้าไม่ได้ขึ้นต้นแนวคำถาม
+        question_markers = ['คือ', 'อะไร', 'ทำไม', 'อย่างไร', 'เมื่อไหร่', 'ที่ไหน']
+        if not any(m in q for m in question_markers):
+            variants.extend([
+                f"คำตอบของ {q}",
+                f"ข้อมูลเกี่ยวกับ {q}",
+                f"รายละเอียดของ {q}",
+                f"อธิบาย {q}"
+            ])
+
+        # 2) คำพ้องความหมายพื้นฐาน (ไทย)
+        synonyms = {
+            'วิธี': ['วิธีการ', 'ขั้นตอน', 'กระบวนการ'],
+            'ใช้': ['ใช้งาน', 'นำไปใช้', 'ประยุกต์ใช้'],
+            'คือ': ['หมายถึง', 'มีความหมายว่า'],
+            'นโยบาย': ['ข้อกำหนด', 'ระเบียบ', 'กฎ']
+        }
+        for word, syns in synonyms.items():
+            if word in q:
+                for syn in syns:
+                    variants.append(q.replace(word, syn))
+
+        # 3) เพิ่มเวอร์ชันคีย์เวิร์ดล้วน (สั้น กระชับ)
+        kws = self.extract_keywords(q, top_k=3)
+        if len(kws) >= 2:
+            variants.append(" ".join(kws))
+
+        # ลบซ้ำ + คืนรายการ
+        out = list(dict.fromkeys([v for v in variants if v and v.strip()]))
+        return out
+
+    # -------------------- Diversity helper (restored) --------------------
+    def _calculate_jaccard_similarity(self, text1: str, text2: str) -> float:
+        """
+        Jaccard similarity บน token ภาษาไทย (newmm)
+        """
+        t1 = set(word_tokenize((text1 or "").lower(), engine="newmm"))
+        t2 = set(word_tokenize((text2 or "").lower(), engine="newmm"))
+        if not t1 or not t2:
+            return 0.0
+        inter = t1.intersection(t2)
+        union = t1.union(t2)
+        return len(inter) / len(union) if union else 0.0
+
+    def _select_diverse_results(self, candidates: List[Dict[str, Any]], k: int, lambda_param: float = 0.7) -> List[Dict[str, Any]]:
+        """
+        เลือกผลแบบหลากหลาย (MMR-like)
+        - lambda_param สูง → เน้นความเกี่ยวข้องมากกว่า
+        - lambda_param ต่ำ → เน้นความหลากหลายมากกว่า
+        """
         if not candidates:
             return []
-        
-        # เรียงตาม final_score
-        candidates.sort(key=lambda x: x['final_score'], reverse=True)
-        
-        selected = [candidates[0]]  # เลือกผลลัพธ์แรก (คะแนนสูงสุด)
-        remaining = candidates[1:]
-        
+
+        # เรียงเบื้องต้นตาม final_score (ถ้าไม่มีให้ใช้ rerank_score)
+        def base_score(c):
+            return float(c.get('final_score', c.get('rerank_score', 0.0)))
+
+        pool = sorted(candidates, key=base_score, reverse=True)
+        selected: List[Dict[str, Any]] = [pool[0]]
+        remaining = pool[1:]
+
         while len(selected) < k and remaining:
-            best_score = -float('inf')
             best_idx = -1
-            
-            for i, candidate in enumerate(remaining):
-                relevance = candidate['final_score']
-                
-                # คำนวณ diversity (ความแตกต่างจากที่เลือกแล้ว)
-                max_similarity = 0
-                for selected_doc in selected:
-                    similarity = self._calculate_jaccard_similarity(
-                        candidate['content'], 
-                        selected_doc['content']
-                    )
-                    max_similarity = max(max_similarity, similarity)
-                
-                # MMR score
-                mmr_score = lambda_param * relevance - (1 - lambda_param) * max_similarity
-                
-                if mmr_score > best_score:
-                    best_score = mmr_score
+            best_mmr = -1e9
+            for i, cand in enumerate(remaining):
+                relevance = base_score(cand)
+                # ความคล้ายสูงสุดกับสิ่งที่เลือกไปแล้ว
+                max_sim = 0.0
+                for s in selected:
+                    sim = self._calculate_jaccard_similarity(cand.get('content', ''), s.get('content', ''))
+                    if sim > max_sim:
+                        max_sim = sim
+                # MMR
+                mmr = lambda_param * relevance - (1 - lambda_param) * max_sim
+                if mmr > best_mmr:
+                    best_mmr = mmr
                     best_idx = i
-            
+
             if best_idx >= 0:
                 selected.append(remaining.pop(best_idx))
             else:
                 break
-        
+
         return selected[:k]
-    
-    def _calculate_jaccard_similarity(self, text1: str, text2: str) -> float:
-        """คำนวณ Jaccard similarity"""
-        tokens1 = set(word_tokenize(text1.lower(), engine="newmm"))
-        tokens2 = set(word_tokenize(text2.lower(), engine="newmm"))
-        
-        intersection = tokens1.intersection(tokens2)
-        union = tokens1.union(tokens2)
-        
-        return len(intersection) / len(union) if union else 0
-    
-    def search_with_filters(self, query: str, k: int = 5, source_filter: Optional[str] = None, 
-                           min_score: float = 0.0) -> List[Dict[str, Any]]:
-        """ค้นหาพร้อมกรองผลลัพธ์"""
-        results = self.similarity_search(query, k=k*2, use_enhanced=True)  # ดึงมากกว่าเพื่อกรอง
-        
-        filtered_results = []
-        for result in results:
-            # กรองตาม source
-            if source_filter and source_filter.lower() not in result['metadata'].get('source', '').lower():
-                continue
-            
-            # กรองตาม minimum score
-            if result.get('final_score', result.get('rerank_score', 0)) < min_score:
-                continue
-            
-            filtered_results.append(result)
-            
-            if len(filtered_results) >= k:
-                break
-        
-        return filtered_results
-    
-    def get_collection_info(self):
-        """Get information about the collection"""
-        return {
-            "count": self.collection.count(),
-            "name": self.collection_name,
-            "doc_freq_size": len(self.doc_freq),
-            "total_docs": self.total_docs
-        }

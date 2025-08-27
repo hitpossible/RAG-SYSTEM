@@ -12,8 +12,9 @@ import uuid
 from typing import List, Optional
 import base64
 from src.file_extractors import sniff_and_extract
+from src.translate_system import Translate
 
-from helpers.helpers_storage import (
+from helper.helpers_storage import (
     compute_sha256, build_storage_key, save_bytes_local,
     insert_file_meta, upsert_file_text, storage_key_to_url
 )
@@ -28,6 +29,7 @@ def setup_directories():
 # --- Init ---
 setup_directories()
 rag = RAGSystem()
+translate = Translate()
 
 # --- FastAPI app ---
 app = FastAPI(title="RAG API")
@@ -54,6 +56,13 @@ class QueryRequest(BaseModel):
     session_id: str = "default"
     user_id: str = "anonymous"
     files: Optional[List[ClientFile]] = None
+
+class TranslateRequest(BaseModel):
+    text: str
+    source: Optional[str] = "auto"
+    target: str
+    session_id: str = "default"
+    user_id: str = "anonymous"
 
 # --- Endpoint: System Info ---
 @app.get("/system-info")
@@ -114,21 +123,6 @@ async def query_stream(request: Request):
 
 # --- Endpoint: Query (Normal JSON) ---
 @app.post("/query")
-# async def query_json(request: QueryRequest):
-#     question = request.text.strip()
-#     session_id = request.session_id
-#     user_id = request.user_id
-
-#     if not question:
-#         return JSONResponse(content={"error": "Empty question"}, status_code=400)
-
-#     result = rag.query(question, session_id, user_id)
-
-#     return {
-#         "answer": result["answer"],
-#         "retrieved_docs_count": result["retrieved_docs_count"],
-#         "sources": result["sources"]
-#     }
 async def query_json(request: QueryRequest):
     question = (request.text or "").strip()
     if not question:
@@ -175,6 +169,25 @@ async def query_json(request: QueryRequest):
         "sources": result["sources"]
     }
 
+
+@app.post("/translate")
+async def translate_json(request: TranslateRequest):
+    text = (request.text or "").strip()
+    if not text:
+        return JSONResponse({"error": "Empty text"}, status_code=400)
+
+    try:
+        translated_text = translate.translate(
+            text=request.text,
+            source_lang=request.source,
+            target_lang=request.target,
+            session_id=request.session_id,
+        )
+        return {
+            "translated_text": translated_text
+        }
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
 
 # --- Endpoint: Ingest Documents ---
 @app.post("/ingest")

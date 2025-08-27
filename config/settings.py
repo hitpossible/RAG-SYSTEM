@@ -13,12 +13,12 @@ class Settings:
     # EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
     # EMBEDDING_MODEL = "text-embedding-3-small"
     
-    LLM_MODEL = "llama3.2:latest"  # Ollama model name
+    LLM_MODEL = "qwen3:8b"
     
     # RAG Parameters
-    CHUNK_SIZE = 1000
-    CHUNK_OVERLAP = 200
-    TOP_K_RESULTS = 3
+    CHUNK_SIZE = 900
+    CHUNK_OVERLAP = 120
+    TOP_K_RESULTS = 10
     
     # Ollama Settings
     OLLAMA_BASE_URL = "http://localhost:11434"
