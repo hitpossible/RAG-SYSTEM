@@ -29,14 +29,13 @@ class Translate():
 
     def translate(self, text: str, source_lang: str = "auto", target_lang: str = "en", session_id: str = None) -> str:
        
-        prompt = (f"Translate {text}  from '{source_lang}' to '{target_lang}'")
 
         if session_id:
             self.insert_message(session_id, 'user', text)
 
         try:
             answer = self.llm_client.translate_response(
-                prompt=prompt,
+                prompt=text,
                 source_lang=source_lang,
                 target_lang=target_lang,
             )
