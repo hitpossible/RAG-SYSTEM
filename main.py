@@ -13,13 +13,14 @@ from typing import List, Optional
 import base64
 from src.file_extractors import sniff_and_extract
 from src.translate_system import Translate
-
+from dotenv import load_dotenv
 from helper.helpers_storage import (
     compute_sha256, build_storage_key, save_bytes_local,
     insert_file_meta, upsert_file_text, storage_key_to_url
 )
 
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+load_dotenv()
 
 # --- Setup directories ---
 def setup_directories():
@@ -221,4 +222,4 @@ async def delete_chat_history(session_id: str):
 # --- Entry point ---
 if __name__ == "__main__":
     # rag.ingest_documents() 
-    uvicorn.run("main:app", host="172.21.83.10", port=8002, reload=True, log_level="critical",)
+    uvicorn.run("main:app", host=os.getenv("URL", "127.0.0.1"), port=int(os.getenv("PORT", 8002)), reload=True, log_level="critical",)
