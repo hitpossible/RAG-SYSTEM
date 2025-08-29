@@ -12,6 +12,7 @@ import re
 from pythainlp.util import normalize
 from collections import Counter
 import math
+import hashlib
 
 class VectorStore:
     def __init__(self, db_path: str, embedding_model: str):
@@ -49,6 +50,9 @@ class VectorStore:
             'ผู้', 'คน', 'บุคคล', 'ตัว', 'อัน', 'สิ่ง', 'การ', 'ความ', 'เรื่อง'
         }
 
+    def make_id(self, text: str) -> str:
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    
     # -------------------- Utils (เหมือนเดิม + เล็กน้อย) --------------------
     def normalize_thai(self, text: str) -> str:
         text = normalize(text)
@@ -143,6 +147,8 @@ class VectorStore:
             else:
                 cleaned[k] = str(v)
         return cleaned
+    
+    
 
     def add_documents(self, documents: List[Document]):
         """
@@ -192,8 +198,10 @@ class VectorStore:
 
         # --- สร้าง embeddings (passage mode + normalize) ---
         embeddings = self._encode_texts(embed_texts, is_query=False)
+        
 
-        ids = [str(uuid.uuid4()) for _ in range(len(texts))]
+        ids = [self.make_id(embed_txt) for embed_txt in embed_texts]
+
         self.collection.add(
             embeddings=embeddings,
             documents=texts,         # เก็บข้อความดิบ

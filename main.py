@@ -124,6 +124,8 @@ async def query_stream(request: Request):
 # --- Endpoint: Query (Normal JSON) ---
 @app.post("/query")
 async def query_json(request: QueryRequest):
+    import datetime
+    print("Time:", datetime.datetime.now().isoformat())
     question = (request.text or "").strip()
     if not question:
         return JSONResponse({"error": "Empty question"}, status_code=400)
@@ -199,10 +201,10 @@ async def ingest_documents():
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 # --- Endpoint: Clear Chat History ---
-@app.post("/chat/clear")
-async def clear_chat_history(session_id: str = Query("default", description="Session ID to clear")):
+@app.delete("/chat/delete/{session_id}")
+async def delete_chat_history(session_id: str):
     try:
-        rag.clear_chat_history(session_id)
+        rag.delete_chat_history(session_id)
         return {"status": "success", "message": f"Chat history for session '{session_id}' cleared."}
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)

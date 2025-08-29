@@ -101,9 +101,9 @@ class LlamaClient:
             system_prompt = (
                 "You are a precise RAG assistant. Use only the provided CONTEXT unless the question "
                 "is general and the context is irrelevant. When you use a claim from the context, "
-                "If the context is insufficient, say 'Insufficient context' and explain what's missing. "
+                "If the context is insufficient, say 'ไม่มีข้อมูลเพียงพอ' and explain what's missing. "
                 "Do not invent citations."
-                "ห้ามแสดงกระบวนการคิด ไม่ใส่ <think> หรือคำอธิบายเบื้องหลังใด ๆ"
+                "Do not invent citations. Do not show your thought process or any <think> tags."
             )
             user_prompt = (
                 "BEGIN CONTEXT\n" +
@@ -115,13 +115,14 @@ class LlamaClient:
                 "- Prefer Thai if the question is Thai; otherwise match the user's language.\n"
             )
 
+            print(user_prompt)
 
         else:
             # ไม่มี context: ตอบจากความรู้ทั่วไป แต่ให้ระบุความไม่แน่ใจถ้าจำเป็น
             system_prompt = (
                 "You are a helpful assistant. Be accurate and well-reasoned. "
                 "If uncertain, say so explicitly."
-                "ห้ามแสดงกระบวนการคิด ไม่ใส่ <think> หรือคำอธิบายเบื้องหลังใด ๆ"
+                "Do not invent citations. Do not show your thought process or any <think> tags."
             )
             user_prompt = (
                 f"USER INPUT:\n{prompt}\n\n"
@@ -138,6 +139,9 @@ class LlamaClient:
         messages.append({'role': 'user', 'content': user_prompt})
 
         try:
+            # print current time
+            import datetime
+            print("Time:", datetime.datetime.now().isoformat())
             resp = self.client.chat(
                 model=self.model_name,
                 messages=messages,
@@ -149,7 +153,8 @@ class LlamaClient:
                     'num_ctx': int(num_ctx), 
                 }
             )
-
+            print("Time:", datetime.datetime.now().isoformat())
+            print(resp['message']['content'])
             return strip_think(resp['message']['content'])
         except Exception as e:
             return f"Error generating response: {e}"

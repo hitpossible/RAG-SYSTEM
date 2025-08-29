@@ -14,6 +14,8 @@ class Settings:
     # EMBEDDING_MODEL = "text-embedding-3-small"
     
     LLM_MODEL = "qwen3:8b"
+    SLM_MODEL = "qwen3:0.6b"
+    # LLM_MODEL = "Qwen3-8B-GGUF:Q4_K_M"
     
     # RAG Parameters
     CHUNK_SIZE = 900

@@ -1,0 +1,27 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Env & secrets
+.env
+*.key
+*.pem
+
+# Databases
+*.sqlite
+*.bin
+
+# Data / Uploads
+data/uploads/
+data/vector_db/
+data/documents/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# OS specific
+.DS_Store
+Thumbs.db

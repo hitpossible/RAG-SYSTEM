@@ -2,10 +2,12 @@
 import os, datetime, re, hashlib, pymysql
 from pathlib import Path
 from typing import Optional
+from db_connect import get_connection
+
+conn = get_connection()
 
 STORAGE_ROOT = Path("data/uploads").resolve()
 SAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
-MYSQL = dict(host='localhost', port=8889, user='root', password='root', database='ai_db', charset='utf8mb4')
 
 def safe_filename(name: str) -> str:
     name = name.strip().replace(" ", "_")
@@ -27,7 +29,6 @@ def save_bytes_local(data: bytes, storage_key: str) -> Path:
 def insert_file_meta(*, owner_user_id: str, role: str, filename: str, mime_type: str,
                      byte_size: int, sha256_hex: str, storage_key: str,
                      session_id: Optional[str] = None, message_id: Optional[str] = None) -> int:
-    conn = pymysql.connect(**MYSQL)
     try:
         with conn.cursor() as cur:
             cur.execute("""
@@ -42,7 +43,6 @@ def insert_file_meta(*, owner_user_id: str, role: str, filename: str, mime_type:
         conn.close()
 
 def upsert_file_text(*, file_id: int, text: str, extractor: str):
-    conn = pymysql.connect(**MYSQL)
     try:
         with conn.cursor() as cur:
             cur.execute("""

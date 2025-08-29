@@ -2,20 +2,17 @@ import re
 from typing import List, Dict, Any, Optional
 from src.llm_client import LlamaClient
 from config.settings import settings
-import pymysql
+from db_connect import get_connection
 
 class Translate():
     def __init__(self):
         self.llm_client = LlamaClient(
-            model_name=settings.LLM_MODEL,
+            model_name=settings.SLM_MODEL,
             base_url=settings.OLLAMA_BASE_URL
         )
     
     def insert_message(self, session_id, role, content):
-        conn = pymysql.connect(
-            host='localhost', port=8889, user='root', password='root',
-            database='ai_db', charset='utf8mb4'
-        )
+        conn = get_connection()
         try:
             with conn.cursor() as cursor:
                 cursor.execute(
@@ -28,8 +25,6 @@ class Translate():
             conn.close()
 
     def translate(self, text: str, source_lang: str = "auto", target_lang: str = "en", session_id: str = None) -> str:
-       
-
         if session_id:
             self.insert_message(session_id, 'user', text)
 

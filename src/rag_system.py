@@ -6,6 +6,8 @@ from langchain_community.chat_message_histories import SQLChatMessageHistory
 import pymysql
 import os
 from typing import List, Dict, Any, Optional
+from db_connect import get_connection
+
 
 class RAGSystem:
     def __init__(self):
@@ -39,10 +41,7 @@ class RAGSystem:
             print("No documents found to ingest")
 
     def insert_message(self, session_id, role, content):
-        conn = pymysql.connect(
-            host='localhost', port=8889, user='root', password='root',
-            database='ai_db', charset='utf8mb4'
-        )
+        conn = get_connection()
         try:
             with conn.cursor() as cursor:
                 cursor.execute(
@@ -54,11 +53,31 @@ class RAGSystem:
         finally:
             conn.close()
 
-    def insert_file_meta(self, message_id, role, filepath, filename=None):
-        conn = pymysql.connect(
-            host='localhost', port=8889, user='root', password='root',
-            database='ai_db', charset='utf8mb4'
+    def delete_message(self, session_id: str = "default"):
+        memory = SQLChatMessageHistory(
+            connection=self.memory_db_path,
+            session_id=session_id,
+            table_name="message_store"
         )
+        memory.clear()
+        conn = get_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """DELETE s, m, f 
+                    FROM sessions s
+                    LEFT JOIN messages m ON s.id = m.session_id
+                    LEFT JOIN files f ON m.id = f.message_id
+                    WHERE s.id = %s""",
+                    (session_id,)
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+    def insert_file_meta(self, message_id, role, filepath, filename=None):
+        conn = get_connection()
         try:
             with conn.cursor() as cursor:
                 cursor.execute(
@@ -325,14 +344,11 @@ class RAGSystem:
             })
         return history
 
-    def clear_chat_history(self, session_id: str = "default"):
-        memory = SQLChatMessageHistory(
-            connection=self.memory_db_path,
-            session_id=session_id,
-            table_name="message_store"
-        )
-        memory.clear()
+    def delete_chat_history(self, session_id: str = "default"):
+        print(session_id)
+        self.delete_message(session_id=session_id)
         print(f"Chat history for session '{session_id}' cleared!")
+        return True
 
     def get_system_info(self):
         return {
