@@ -1,7 +1,7 @@
 import os
 from fastapi import FastAPI, Request, Query, HTTPException
+from fastapi.responses import StreamingResponse, JSONResponse, Response 
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import uvicorn
@@ -34,16 +34,25 @@ translate = Translate()
 # --- FastAPI app ---
 app = FastAPI(title="RAG API")
 
-app.mount("/files", StaticFiles(directory="data/documents"), name="files")
+
+ALLOWED_ORIGINS = [
+    "http://172.21.83.10:3000",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
 
 # --- CORS (ให้เชื่อมจาก frontend ได้) ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # You can restrict by domain here
-    allow_credentials=True,
-    allow_methods=["*"],
+    allow_origins=ALLOWED_ORIGINS,   
+    allow_credentials=True,         
+    allow_methods=["*"],             
     allow_headers=["*"],
+    expose_headers=["*"],      
 )
+
+app.mount("/files", StaticFiles(directory="data/documents"), name="files")
+
 class ClientFile(BaseModel):
     name: str
     type: Optional[str] = ""
@@ -211,6 +220,5 @@ async def delete_chat_history(session_id: str):
 
 # --- Entry point ---
 if __name__ == "__main__":
-    rag.ingest_documents() 
-    print("RAG system initialized and documents ingested.")
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    # rag.ingest_documents() 
+    uvicorn.run("main:app", host="172.21.83.10", port=8002, reload=True, log_level="critical",)

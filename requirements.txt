@@ -11,7 +11,7 @@ blinker==1.9.0
 Brotli==1.1.0
 build==1.2.2.post1
 cachetools==5.5.2
-certifi==2025.7.4
+certifi==2025.8.3
 cffi==1.17.1
 charset-normalizer==3.4.1
 chromadb==1.0.15
@@ -94,7 +94,7 @@ pdfplumber==0.11.7
 pillow==11.1.0
 posthog==5.4.0
 propcache==0.3.2
-protobuf==6.31.1
+protobuf==5.29.2
 pyarrow==21.0.0
 pyasn1==0.6.1
 pyasn1_modules==0.4.2
@@ -122,7 +122,7 @@ regex==2025.7.34
 requests==2.32.3
 requests-oauthlib==2.0.0
 requests-toolbelt==1.0.0
-rich==14.1.0
+rich==13.9.4
 rpds-py==0.22.3
 rsa==4.9.1
 safetensors==0.5.3
@@ -152,7 +152,7 @@ typing_extensions==4.12.2
 tzdata==2025.1
 urllib3==2.3.0
 uvicorn==0.35.0
-uvloop==0.21.0
+uvloop==0.21.0; platform_system != "Windows"
 watchdog==6.0.0
 watchfiles==1.1.0
 websocket-client==1.8.0
