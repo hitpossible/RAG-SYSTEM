@@ -9,6 +9,7 @@ __pycache__/
 *.pem
 
 # Databases
+data/memories.sqlite
 *.sqlite
 *.bin
 
