@@ -104,6 +104,7 @@ class LlamaClient:
                 "If the context is insufficient, say 'ไม่มีข้อมูลเพียงพอ' and explain what's missing. "
                 "Do not invent citations."
                 "Do not invent citations. Do not show your thought process or any <think> tags."
+                "Do not think"
             )
             user_prompt = (
                 "BEGIN CONTEXT\n" +
@@ -122,7 +123,7 @@ class LlamaClient:
             system_prompt = (
                 "You are a helpful assistant. Be accurate and well-reasoned. "
                 "If uncertain, say so explicitly."
-                "Do not invent citations. Do not show your thought process or any <think> tags."
+                "Do not invent citations. Do not show your thought process or any <think> tags. Do not think"
             )
             user_prompt = (
                 f"USER INPUT:\n{prompt}\n\n"
