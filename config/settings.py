@@ -23,6 +23,6 @@ class Settings:
     TOP_K_RESULTS = 10
     
     # Ollama Settings
-    OLLAMA_BASE_URL = "http://localhost:11434"
+    OLLAMA_BASE_URL = "http://172.21.83.10:11434"
 
 settings = Settings()

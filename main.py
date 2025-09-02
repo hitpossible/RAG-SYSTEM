@@ -222,4 +222,5 @@ async def delete_chat_history(session_id: str):
 # --- Entry point ---
 if __name__ == "__main__":
     # rag.ingest_documents() 
-    uvicorn.run("main:app", host=os.getenv("URL", "127.0.0.1"), port=int(os.getenv("PORT", 8002)), reload=True, log_level="critical",)
+    print("Starting server...")
+    uvicorn.run("main:app", host=os.getenv("URL", "127.0.0.1"), port=int(os.getenv("PORT", 8002)), reload=True)
