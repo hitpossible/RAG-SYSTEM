@@ -2,6 +2,7 @@ import os
 import ollama
 from typing import List, Dict, Any, Optional
 import re
+from openai import OpenAI
 
 THINK_PATTERNS = [
     r"(?is)<think>.*?</think>",
@@ -46,19 +47,9 @@ def _trim_chars(s: str, max_chars: int) -> str:
     return cut + " …"
 
 class LlamaClient:
-    def __init__(self, model_name: str = "llama3.2:latest", base_url: str = "http://localhost:11434"):
+    def __init__(self, model_name: str = "Qwen/Qwen3-8B", base_url: str = "http://172.21.83.10:11436/v1"):
         self.model_name = model_name
-        self.client = ollama.Client(host=base_url)
-
-        # ตรวจว่ามีโมเดลไหม
-        try:
-            models = self.client.list()
-            available = [m["model"] for m in models.get("models", [])]
-            if model_name not in available:
-                print(f"[LlamaClient] Model '{model_name}' not found. Available: {available}")
-                print(f"Run: ollama pull {model_name}")
-        except Exception as e:
-            print(f"[LlamaClient] Error connecting to Ollama: {e}. Make sure 'ollama serve' is running.")
+        self.client = OpenAI(base_url=base_url, api_key="EMPTY")
 
     # ---------- core ----------
     def generate_response(
@@ -94,70 +85,63 @@ class LlamaClient:
                     break
                 ctx_blocks.append(block)
                 total += len(block)
-                
         # ---------- prompts ----------
         if ctx_blocks:
-            # RAG + บังคับ citation แบบ [<cid>]
             system_prompt = (
-                "You are a precise RAG assistant. Use only the provided CONTEXT unless the question "
-                "is general and the context is irrelevant. When you use a claim from the context, "
-                "If the context is insufficient, say 'ไม่มีข้อมูลเพียงพอ' and explain what's missing. "
-                "Do not invent citations."
-                "Do not invent citations. Do not show your thought process or any <think> tags."
-                "Answer directly in one sentence."
-            )
-            user_prompt = (
-                "BEGIN CONTEXT\n" +
-                "\n\n".join(ctx_blocks) +
-                "\nEND CONTEXT\n\n" +
-                f"QUESTION:\n{prompt}\n\n"
-                "INSTRUCTIONS:\n"
-                "- Answer concisely.\n"
-                "- Prefer Thai if the question is Thai; otherwise match the user's language.\n"
+                "คุณเป็นผู้ช่วย RAG ที่ตอบอย่างแม่นยำ ใช้เฉพาะข้อมูลจาก CONTEXT เท่านั้น "
+                "ยกเว้นคำถามเป็นเรื่องทั่วไปที่ไม่เกี่ยวกับ context ถึงตอบจากความรู้ทั่วไปได้ "
+                "หาก context ไม่เพียงพอ ให้ตอบว่า 'ไม่มีข้อมูลเพียงพอ' "
+                "และอธิบายว่าขาดอะไร ห้ามเดาหรือแต่งเอง "
+                "***do not think "
+
             )
 
-            print(user_prompt)
+            user_prompt = (
+                "BEGIN CONTEXT\n"
+                + "\n\n".join(ctx_blocks)
+                + "\nEND CONTEXT\n\n"
+                f"คำถาม:\n{prompt}\n\n"
+                "โปรดตอบอย่างกระชับ ตรงประเด็น และเป็นภาษาเดียวกับคำถาม"
+            )
 
         else:
-            # ไม่มี context: ตอบจากความรู้ทั่วไป แต่ให้ระบุความไม่แน่ใจถ้าจำเป็น
             system_prompt = (
-                "You are a helpful assistant. Be accurate and well-reasoned. "
-                "If uncertain, say so explicitly."
-                "Do not invent citations. Do not show your thought process or any <think> tags."    
-                "Answer directly in one sentence."
+                "คุณเป็นผู้ช่วยที่เป็นมิตร ตอบด้วยความรู้ทั่วไปให้ถูกต้อง กระชับ และชัดเจน "
+                "ให้คำตอบตามสามัญความรู้ของโลกและความเข้าใจทั่วไปได้ตามปกติ "
+                # "หากเป็นเพียงการทักทาย เช่น 'สวัสดี' หรือ 'ดีครับ' ให้ตอบกลับด้วยคำทักทายที่เหมาะสม "
+                # "หากคำถามเป็นความรู้ทั่วไป ให้ตอบตามความรู้ที่มี "
+                # "หากคำถามเป็นการขอแปลภาษา เขียนอีเมล หรือจัดรูปแบบข้อความ "
+                # "ให้ทำตามคำขอทันที โดยไม่ต้องพึ่ง context "
+                # "ทุกคำตอบที่ไม่ได้อ้างอิง context ของบริษัท ต้องระบุด้วยว่า "
+                # "'คำตอบนี้ไม่ได้อ้างอิงข้อมูลจากบริษัท เป็นเพียงความรู้ทั่วไป/การแปลข้อความ' "
+                "รายละเอียดเชิงตัวเลขหรือวันที่ล่าสุด ซึ่งคุณไม่สามารถทราบได้จากความรู้ทั่วไป "
+                "ตอบเฉพาะคำตอบสุดท้าย ไม่ต้องอธิบายขั้นตอนการคิด"
+                "***do not think "
             )
+
             user_prompt = (
-                f"USER INPUT:\n{prompt}\n\n"
-                "INSTRUCTIONS:\n"
-                "- If this looks like a question → answer as QA.\n"
-                "- If this looks like a translation request → translate accordingly.\n"
-                "- Answer concisely in the expected language."
+                f"คำถาม:\n{prompt}\n\n"
+                "โปรดตอบอย่างกระชับ ตรงประเด็น และเป็นภาษาเดียวกับคำถาม"
             )
 
         messages = [{'role': 'system', 'content': system_prompt}]
         if history:
-            # เก็บแค่ท้าย ๆ กัน context ล้น
             messages.extend(history[-10:])
         messages.append({'role': 'user', 'content': user_prompt})
 
+        print(messages)
+
         try:
-            # print current time
             import datetime
-            print("Time:", datetime.datetime.now().isoformat())
-            resp = self.client.chat(
+            resp = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=messages,
-                options={
-                    'temperature': float(temperature),
-                    'top_p': 0.9,
-                    'repeat_penalty': 1.1,
-                    'num_predict': int(num_predict), 
-                    'num_ctx': int(num_ctx), 
-                }
+                temperature=float(temperature),
+                top_p=0.9,
+                frequency_penalty=1.1,
+                max_tokens=int(num_predict),
             )
-            print("Time:", datetime.datetime.now().isoformat())
-            print(resp['message']['content'])
-            return strip_think(resp['message']['content'])
+            return strip_think(resp.choices[0].message.content)
         except Exception as e:
             return f"Error generating response: {e}"
 
@@ -193,17 +177,13 @@ class LlamaClient:
         ]
 
         try:
-            resp = self.client.chat(
+            resp = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=messages,
-                options={
-                    'temperature': 0.3,
-                    'top_p': 0.9,
-                    'repeat_penalty': 1.1,
-                    'num_predict': 1024, 
-                    'num_ctx': 8192, 
-                }
+                temperature=float(0.3),
+                top_p=0.9,
+                frequency_penalty=1.1,
             )
-            return strip_think(resp['message']['content'])
+            return strip_think(resp.choices[0].message.content)
         except Exception as e:
             return f"Error generating translation: {e}"

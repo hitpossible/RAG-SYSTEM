@@ -13,7 +13,8 @@ class Settings:
     # EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
     # EMBEDDING_MODEL = "text-embedding-3-small"
     
-    LLM_MODEL = "qwen3:8b"
+    # LLM_MODEL = "Qwen/Qwen3-8B"
+    LLM_MODEL = "openai/gpt-oss-20b"
     SLM_MODEL = "qwen3:0.6b"
     # LLM_MODEL = "Qwen3-8B-GGUF:Q4_K_M"
     
@@ -23,6 +24,6 @@ class Settings:
     TOP_K_RESULTS = 10
     
     # Ollama Settings
-    OLLAMA_BASE_URL = "http://172.21.83.10:11434"
+    LLM_BASE_URL = "http://172.21.83.10:11436/v1"
 
 settings = Settings()

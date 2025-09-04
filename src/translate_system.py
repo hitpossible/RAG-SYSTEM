@@ -7,8 +7,8 @@ from db_connect import get_connection
 class Translate():
     def __init__(self):
         self.llm_client = LlamaClient(
-            model_name=settings.SLM_MODEL,
-            base_url=settings.OLLAMA_BASE_URL
+            model_name=settings.LLM_MODEL,
+            base_url=settings.LLM_BASE_URL
         )
     
     def insert_message(self, session_id, role, content):

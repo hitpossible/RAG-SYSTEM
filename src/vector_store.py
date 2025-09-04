@@ -50,6 +50,11 @@ class VectorStore:
             'ผู้', 'คน', 'บุคคล', 'ตัว', 'อัน', 'สิ่ง', 'การ', 'ความ', 'เรื่อง'
         }
 
+        self.max_aug_queries = 2            
+        self.per_query_fetch_cap = 10      
+        self.rerank_top_m = 12          
+        self.use_cross_encoder = True 
+
     def make_id(self, text: str) -> str:
         return hashlib.sha256(text.encode("utf-8")).hexdigest()
     
@@ -151,10 +156,6 @@ class VectorStore:
     
 
     def add_documents(self, documents: List[Document]):
-        """
-        แนะนำ chunk_size ≈ 900–1100 tokens, overlap ≈ 120–200 (คุณตั้ง 1000/200 ไว้แล้วดี)
-        เพิ่ม boost ด้วย title/section ในข้อความฝั่ง embeddings
-        """
         if not documents:
             return
 
@@ -168,31 +169,32 @@ class VectorStore:
             raw = doc.page_content or ""
             meta = dict(doc.metadata or {})
 
-            # --- ทำความสะอาด + tokenize ภาษาไทย ---
             norm = self.normalize_thai(raw)
             tokenized = self.tokenize_thai(norm)
 
-            # --- boost จาก title/section ---
             title = (meta.get("title") or meta.get("file_name") or "").strip()
             section = (meta.get("section") or meta.get("heading") or "").strip()
             prefix = ""
-            if title:
-                prefix += f"[TITLE] {title}\n"
-            if section:
-                prefix += f"[SECTION] {section}\n"
+            if title:   prefix += f"[TITLE] {title}\n"
+            if section: prefix += f"[SECTION] {section}\n"
 
             embed_txt = (prefix + tokenized).strip()
 
             texts.append(raw)
             embed_texts.append(embed_txt)
 
-            # enrich metadata
+            toks_list = word_tokenize(raw.lower(), engine="newmm")
+            keywords = [tok for tok, _ in Counter(
+                [t for t in toks_list if len(t) > 1 and t not in self.thai_stopwords]
+            ).most_common(10)]
+
             enriched = meta.copy()
-            keywords = self.extract_keywords(raw)
             enriched["keywords"] = ", ".join(keywords) if keywords else ""
-            enriched["word_count"] = len(word_tokenize(raw, engine="newmm"))
+            enriched["keywords_set"] = set(keywords)          
+            enriched["tokens"] = toks_list                    
+            enriched["word_count"] = len(toks_list)
             enriched["char_count"] = len(raw)
-            enriched["full_content"] = prefix + raw   # ✅ เก็บเนื้อหาจริง + title/section
+            enriched["full_content"] = prefix + raw
             metadatas.append(self._clean_metadata(enriched))
 
 
@@ -204,7 +206,7 @@ class VectorStore:
 
         self.collection.add(
             embeddings=embeddings,
-            documents=texts,         # เก็บข้อความดิบ
+            documents=texts,        
             metadatas=metadatas,
             ids=ids,
         )
@@ -247,48 +249,84 @@ class VectorStore:
 
     def _enhanced_similarity_search(self, query: str, k: int) -> List[Dict[str, Any]]:
         enhanced_queries = self.enhance_query(query)
+        # เหลือแค่ 2 เวอร์ชันพอ
+        enhanced_queries = enhanced_queries[:self.max_aug_queries]
+
+        # คีย์เวิร์ดของ query (ทำครั้งเดียว)
         query_tokens = self.extract_keywords(query)
+        q_keywords = set(query_tokens)
 
         all_candidates: Dict[str, Dict[str, Any]] = {}
-        for eq in enhanced_queries[:3]:
+        per_fetch = min(k * 2, self.per_query_fetch_cap)
+
+        for eq in enhanced_queries:
             q_emb = self._encode_texts([eq], is_query=True)
-            results = self._query_collection(q_emb, n_results=min(k * 2, 15))
-            for i in range(len(results['documents'][0])):
-                doc_id = results['ids'][0][i]
-                meta = results['metadatas'][0][i] or {}
-                # ✅ ใช้ full_content ถ้ามี
-                candidate_text = meta.get("content") or results['documents'][0][i]
+            results = self._query_collection(q_emb, n_results=per_fetch)
+
+            # รวมผู้สมัครแบบ unique
+            docs0 = results['documents'][0]
+            metas0 = results['metadatas'][0]
+            dists0 = results['distances'][0]
+            ids0   = results['ids'][0]
+
+            for i in range(len(docs0)):
+                doc_id = ids0[i]
+                meta = metas0[i] or {}
+                # <<< FIX BUG: ใช้ full_content ให้ตรงกับตอน ingest >>>
+                candidate_text = meta.get("full_content") or docs0[i]
 
                 if doc_id not in all_candidates:
                     all_candidates[doc_id] = {
                         'content': candidate_text,
                         'metadata': meta,
-                        'distance': results['distances'][0][i],
+                        'distance': dists0[i],
                         'doc_id': doc_id
                     }
 
         candidates = list(all_candidates.values())
+        if not candidates:
+            return []
 
-        # semantic score
+        # ===== คำนวณคะแนนแบบไม่ tokenize ซ้ำ =====
         enhanced_candidates = []
         for doc in candidates:
+            meta = doc.get('metadata') or {}
+
+            # semantic distance -> score
             semantic_score = max(0.0, 1.0 - float(doc['distance']))
-            tfidf_score = self.calculate_tfidf_score(query_tokens, doc['content']) if (query_tokens and self.total_docs > 0) else 0.0
 
-            doc_keywords = set(self.extract_keywords(doc['content']))
-            q_keywords = set(query_tokens)
-            keyword_overlap = len(doc_keywords & q_keywords)
-            keyword_score = (keyword_overlap / len(q_keywords)) if q_keywords else 0.0
+            # ใช้ tokens ที่ precompute แล้ว
+            dtoks = meta.get('tokens') or word_tokenize(doc['content'].lower(), engine="newmm")
+            dfreq = Counter(dtoks)
 
-            metadata = doc.get('metadata', {}) or {}
+            # TF-IDF แบบเร็ว: ไม่ต้องวน extract ใหม่
+            tfidf_score = 0.0
+            if self.total_docs > 0 and q_keywords:
+                N = self.total_docs
+                for tok in q_keywords:
+                    tf = dfreq.get(tok, 0) / (len(dtoks) or 1)
+                    if tf > 0:
+                        df = self.doc_freq.get(tok, 1)
+                        tfidf_score += math.log((N + 1) / (df + 1)) * tf
+
+            # keyword overlap แบบ set
+            meta_kw = meta.get('keywords_set')
+            if isinstance(meta_kw, list):
+                meta_kw = set(meta_kw)
+            if not isinstance(meta_kw, set):
+                meta_kw = set(str(meta.get('keywords','')).split(',')) if meta.get('keywords') else set()
+                meta_kw = {x.strip().lower() for x in meta_kw if x.strip()}
+
+            overlap = len(q_keywords & meta_kw)
+            keyword_score = (overlap / (len(q_keywords) or 1))
+
             metadata_score = 0.0
-            if 'source' in metadata and any(kw in str(metadata['source']).lower() for kw in query_tokens):
+            if 'source' in meta and any(kw in str(meta['source']).lower() for kw in q_keywords):
                 metadata_score += 0.1
-            if 'keywords' in metadata and metadata['keywords']:
-                meta_keywords = {kw.strip().lower() for kw in str(metadata['keywords']).split(',') if kw.strip()}
-                metadata_score += len(meta_keywords & {kw.lower() for kw in query_tokens}) * 0.05
+            if meta_kw:
+                metadata_score += len(meta_kw & q_keywords) * 0.05
 
-            wc = metadata.get('word_count', len(doc['content'].split()))
+            wc = meta.get('word_count', len(dtoks))
             length_penalty = 1.0 if wc < 500 else 0.9 if wc < 1000 else 0.8
 
             enhanced_candidates.append({
@@ -300,28 +338,49 @@ class VectorStore:
                 'length_penalty': length_penalty,
             })
 
-        # cross-encoder rerank (เพิ่ม context จาก metadata เหมือนเดิม)
-        pairs = []
-        for d in enhanced_candidates:
-            ctx = ""
-            if 'source' in d['metadata']: ctx += f"[{d['metadata']['source']}] "
-            if 'section' in d['metadata']: ctx += f"หัวข้อ: {d['metadata']['section']} "
-            pairs.append((query, f"{ctx}{d['content']}"))
+        # ===== Pre-filter ก่อนเข้า cross-encoder =====
+        # เอา top ตาม semantic+tfidf ก่อน (ถูกกว่า)
+        prelim_sorted = sorted(
+            enhanced_candidates,
+            key=lambda d: (0.6*d['semantic_score'] + 0.4*d['tfidf_score']),
+            reverse=True
+        )
+        top_for_rerank = prelim_sorted[:min(self.rerank_top_m, len(prelim_sorted))]
 
-        rr = self.rerank_model.predict(pairs) if pairs else []
+        # ===== Cross-encoder (optional) =====
         final_candidates = []
-        for d, r in zip(enhanced_candidates, rr):
-            final_score = (
-                0.35 * float(r) +
-                0.25 * d['semantic_score'] +
-                0.20 * d['tfidf_score'] +
-                0.10 * d['keyword_score'] +
-                0.05 * d['metadata_score'] +
-                0.05 * d['length_penalty']
-            )
-            final_candidates.append({**d, 'rerank_score': float(r), 'final_score': float(final_score)})
+        if self.use_cross_encoder and top_for_rerank:
+            pairs = []
+            for d in top_for_rerank:
+                meta = d.get('metadata') or {}
+                ctx = ""
+                if 'source' in meta:  ctx += f"[{meta['source']}] "
+                if 'section' in meta: ctx += f"หัวข้อ: {meta['section']} "
+                pairs.append((query, f"{ctx}{d['content']}"))
 
+            rr = self.rerank_model.predict(pairs)
+            for d, r in zip(top_for_rerank, rr):
+                final_score = (
+                    0.50 * float(r) +
+                    0.25 * d['semantic_score'] +
+                    0.15 * d['tfidf_score'] +
+                    0.05 * d['keyword_score'] +
+                    0.05 * d['length_penalty']
+                )
+                final_candidates.append({**d, 'rerank_score': float(r), 'final_score': float(final_score)})
+        else:
+            # ไม่มี cross-encoder ก็ถ่วงน้ำหนักจากสกอร์ที่มี
+            for d in top_for_rerank:
+                final_score = (
+                    0.65 * d['semantic_score'] +
+                    0.30 * d['tfidf_score'] +
+                    0.05 * d['keyword_score']
+                )
+                final_candidates.append({**d, 'final_score': float(final_score)})
+
+        # ===== Diversify แบบไม่ tokenize ซ้ำ =====
         return self._select_diverse_results(final_candidates, k, lambda_param=0.7)
+
 
     
     # -------------------- Query expansion (restored) --------------------
@@ -367,55 +426,67 @@ class VectorStore:
         return out
 
     # -------------------- Diversity helper (restored) --------------------
-    def _calculate_jaccard_similarity(self, text1: str, text2: str) -> float:
-        """
-        Jaccard similarity บน token ภาษาไทย (newmm)
-        """
-        t1 = set(word_tokenize((text1 or "").lower(), engine="newmm"))
-        t2 = set(word_tokenize((text2 or "").lower(), engine="newmm"))
-        if not t1 or not t2:
+    def _calculate_jaccard_similarity(self, text1: str, text2: str, toks1=None, toks2=None) -> float:
+        if toks1 is None:
+            toks1 = set(word_tokenize((text1 or "").lower(), engine="newmm"))
+        else:
+            toks1 = set(toks1)
+        if toks2 is None:
+            toks2 = set(word_tokenize((text2 or "").lower(), engine="newmm"))
+        else:
+            toks2 = set(toks2)
+        if not toks1 or not toks2:
             return 0.0
-        inter = t1.intersection(t2)
-        union = t1.union(t2)
+        inter = toks1 & toks2
+        union = toks1 | toks2
         return len(inter) / len(union) if union else 0.0
 
-    def _select_diverse_results(self, candidates: List[Dict[str, Any]], k: int, lambda_param: float = 0.7) -> List[Dict[str, Any]]:
-        """
-        เลือกผลแบบหลากหลาย (MMR-like)
-        - lambda_param สูง → เน้นความเกี่ยวข้องมากกว่า
-        - lambda_param ต่ำ → เน้นความหลากหลายมากกว่า
-        """
-        if not candidates:
-            return []
 
-        # เรียงเบื้องต้นตาม final_score (ถ้าไม่มีให้ใช้ rerank_score)
+    def _select_diverse_results(self, candidates, k, lambda_param=0.7):
+        if not candidates: return []
+
         def base_score(c):
             return float(c.get('final_score', c.get('rerank_score', 0.0)))
 
         pool = sorted(candidates, key=base_score, reverse=True)
-        selected: List[Dict[str, Any]] = [pool[0]]
+        selected = [pool[0]]
         remaining = pool[1:]
+
+        # เตรียม tokens ล่วงหน้า
+        def get_toks(d):
+            meta = d.get('metadata') or {}
+            toks = meta.get('tokens')
+            if toks: return toks
+            # fallback ครั้งเดียว
+            return word_tokenize(d.get('content','').lower(), engine="newmm")
+
+        selected_toks = [get_toks(pool[0])]
 
         while len(selected) < k and remaining:
             best_idx = -1
             best_mmr = -1e9
             for i, cand in enumerate(remaining):
                 relevance = base_score(cand)
-                # ความคล้ายสูงสุดกับสิ่งที่เลือกไปแล้ว
+                cand_toks = get_toks(cand)
                 max_sim = 0.0
-                for s in selected:
-                    sim = self._calculate_jaccard_similarity(cand.get('content', ''), s.get('content', ''))
+                for s, s_toks in zip(selected, selected_toks):
+                    sim = self._calculate_jaccard_similarity(
+                        cand.get('content',''), s.get('content',''),
+                        toks1=cand_toks, toks2=s_toks
+                    )
                     if sim > max_sim:
                         max_sim = sim
-                # MMR
                 mmr = lambda_param * relevance - (1 - lambda_param) * max_sim
                 if mmr > best_mmr:
                     best_mmr = mmr
                     best_idx = i
 
             if best_idx >= 0:
-                selected.append(remaining.pop(best_idx))
+                chosen = remaining.pop(best_idx)
+                selected.append(chosen)
+                selected_toks.append(get_toks(chosen))
             else:
                 break
 
         return selected[:k]
+

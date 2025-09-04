@@ -135,7 +135,6 @@ async def query_stream(request: Request):
 @app.post("/query")
 async def query_json(request: QueryRequest):
     import datetime
-    print("Time:", datetime.datetime.now().isoformat())
     question = (request.text or "").strip()
     if not question:
         return JSONResponse({"error": "Empty question"}, status_code=400)
@@ -196,7 +195,7 @@ async def translate_json(request: TranslateRequest):
             session_id=request.session_id,
         )
         return {
-            "translated_text": translated_text
+            "answer": translated_text
         }
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)

@@ -23,7 +23,7 @@ class RAGSystem:
 
         self.llm_client = LlamaClient(
             model_name=settings.LLM_MODEL,
-            base_url=settings.OLLAMA_BASE_URL
+            base_url=settings.LLM_BASE_URL
         )
 
         os.makedirs("data", exist_ok=True)
@@ -96,8 +96,6 @@ class RAGSystem:
         user_id: str = 'anonymouse',
         uploaded_docs: Optional[List[Dict[str, Any]]] = None
     ) -> dict:
-        print(f"Processing query: {question}")
-
         use_memory = session_id != "default"
         memory = None
         history = []
@@ -111,21 +109,17 @@ class RAGSystem:
             memory.add_user_message(question)
             msg_id_user = self.insert_message(session_id, "user", question)
 
-            # เผื่อไฟล์ที่อัปโหลดมากับคำถาม
             if uploaded_docs:
                 for ud in uploaded_docs:
                     vpath = ud.get('filepath') or f"/uploads/{ud.get('filename','unknown')}"
                     self.insert_file_meta(msg_id_user, "user", vpath, ud.get('filename'))
 
-            # สร้าง history ให้ LLM
             for msg in memory.messages:
                 if msg.type == "human":
                     history.append({"role": "user", "content": msg.content})
                 elif msg.type == "ai":
                     history.append({"role": "assistant", "content": msg.content})
-
-        # ----- Retrieve จากเวกเตอร์สโตร์ -----
-                # ----- Retrieve จากเวกเตอร์สโตร์ -----
+        import datetime
         retrieved_docs = self.vector_store._enhanced_similarity_search(
             question,
             k=max(10, settings.TOP_K_RESULTS)  # ดึงมาเยอะขึ้นนิด เพื่อเปิดทาง rerank
@@ -274,15 +268,11 @@ class RAGSystem:
         avg_final = sum(d.get('final_score', 0.0) for d in filtered_docs) / max(1, len(filtered_docs))
         low_confidence = (avg_sim < 0.50) and (avg_final < 0.60)
 
-        # ----- เรียก LLM พร้อมบริบท -----
+
         answer = self.llm_client.generate_response(
             question if not low_confidence else f"""\
-คำถาม: {question}
-
-ข้อกำหนดความปลอดภัย:
-- หากบริบทที่ให้มาไม่ตรงกับคำถามหรือไม่เพียงพอ ห้ามเดา
-- ให้ตอบว่า "ยังไม่พบข้อมูลเพียงพอในเอกสาร" และสรุปว่าขาดอะไร
-""",
+                คำถาม: {question}
+            """,
             filtered_docs,
             history=history if use_memory else None
         )
