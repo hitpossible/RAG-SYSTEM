@@ -76,13 +76,13 @@ class RAGSystem:
             conn.close()
 
 
-    def insert_file_meta(self, message_id, role, filepath, filename=None):
+    def insert_file_meta(self, message_id, role, filepath, filename=None, file_type=None, file_size=None):
         conn = get_connection()
         try:
             with conn.cursor() as cursor:
                 cursor.execute(
-                    "INSERT INTO files (message_id, role, file, file_name, created_at) VALUES (%s, %s, %s, %s, NOW())",
-                    (message_id, role, filepath, filename)
+                    "INSERT INTO files (message_id, role, file, file_name, file_size, file_type, created_at) VALUES (%s, %s, %s, %s, %s, %s, NOW())",
+                    (message_id, role, filepath, filename, file_size, file_type)
                 )
             conn.commit()
             return cursor.lastrowid
@@ -112,7 +112,7 @@ class RAGSystem:
             if uploaded_docs:
                 for ud in uploaded_docs:
                     vpath = ud.get('filepath') or f"/uploads/{ud.get('filename','unknown')}"
-                    self.insert_file_meta(msg_id_user, "user", vpath, ud.get('filename'))
+                    self.insert_file_meta(msg_id_user, "user", vpath, ud.get('filename'), ud.get('file_type'), ud.get('file_size'))
 
             for msg in memory.messages:
                 if msg.type == "human":
@@ -308,6 +308,7 @@ class RAGSystem:
 
             sources.append({
                 "source": link_src or "Unknown",
+                "file_name": link_src.split('/')[-1] if link_src else "Unknown",
                 "similarity": float(doc.get('similarity', 0.0)),
                 "content_preview": (doc.get('content','')[:200] + "...") if doc.get('content') else ""
             })

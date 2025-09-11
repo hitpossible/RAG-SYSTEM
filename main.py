@@ -162,8 +162,9 @@ async def query_json(request: QueryRequest):
             uploaded_docs.append({
                 "filename": f.name,
                 "filepath": storage_key_to_url(storage_key),
-                "kind": kind,
-                "content": extracted
+                "file_type": kind,
+                "content": extracted,
+                "file_size": len(data_bytes),
             })
 
     # ยิงเข้า RAG พร้อมไฟล์ที่แตกข้อความแล้ว

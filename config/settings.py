@@ -13,8 +13,8 @@ class Settings:
     # EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
     # EMBEDDING_MODEL = "text-embedding-3-small"
     
-    # LLM_MODEL = "Qwen/Qwen3-8B"
-    LLM_MODEL = "openai/gpt-oss-20b"
+    LLM_MODEL = "Qwen/Qwen3-8B"
+    # LLM_MODEL = "openai/gpt-oss-20b"
     SLM_MODEL = "qwen3:0.6b"
     # LLM_MODEL = "Qwen3-8B-GGUF:Q4_K_M"
     
