@@ -66,6 +66,7 @@ class QueryRequest(BaseModel):
     session_id: str = "default"
     user_id: str = "anonymous"
     files: Optional[List[ClientFile]] = None
+    useMemories: bool = False
 
 class TranslateRequest(BaseModel):
     text: str
@@ -172,13 +173,15 @@ async def query_json(request: QueryRequest):
         question,
         session_id=request.session_id,
         user_id=request.user_id,
-        uploaded_docs=uploaded_docs
+        uploaded_docs=uploaded_docs,
+        use_memory=request.useMemories,
     )
 
     return {
         "answer": result["answer"],
         "retrieved_docs_count": result["retrieved_docs_count"],
-        "sources": result["sources"]
+        "sources": result["sources"],
+        "followups": result["followups"],
     }
 
 

@@ -7,6 +7,7 @@ import pymysql
 import os
 from typing import List, Dict, Any, Optional
 from db_connect import get_connection
+import json
 
 
 class RAGSystem:
@@ -53,6 +54,19 @@ class RAGSystem:
         finally:
             conn.close()
 
+    def get_message(self, message_id):
+        conn = get_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT * FROM messages WHERE session_id = %s",
+                    (message_id,)
+                )
+                result = cursor.fetchone()
+            return result
+        finally:
+            conn.close()
+
     def delete_message(self, session_id: str = "default"):
         memory = SQLChatMessageHistory(
             connection=self.memory_db_path,
@@ -94,19 +108,26 @@ class RAGSystem:
         question: str,
         session_id: str = "default",
         user_id: str = 'anonymouse',
-        uploaded_docs: Optional[List[Dict[str, Any]]] = None
+        uploaded_docs: Optional[List[Dict[str, Any]]] = None,
+        use_memory = False
     ) -> dict:
-        use_memory = session_id != "default"
         memory = None
         history = []
 
-        if use_memory:
+        if use_memory and session_id != "default" and session_id is not None:
             memory = SQLChatMessageHistory(
                 connection=self.memory_db_path,
                 session_id=session_id,
                 table_name="message_store"
             )
             memory.add_user_message(question)
+            for msg in memory.messages:
+                if msg.type == "human":
+                    history.append({"role": "user", "content": msg.content})
+                elif msg.type == "ai":
+                    history.append({"role": "assistant", "content": msg.content})
+
+        if session_id != "default":
             msg_id_user = self.insert_message(session_id, "user", question)
 
             if uploaded_docs:
@@ -114,16 +135,12 @@ class RAGSystem:
                     vpath = ud.get('filepath') or f"/uploads/{ud.get('filename','unknown')}"
                     self.insert_file_meta(msg_id_user, "user", vpath, ud.get('filename'), ud.get('file_type'), ud.get('file_size'))
 
-            for msg in memory.messages:
-                if msg.type == "human":
-                    history.append({"role": "user", "content": msg.content})
-                elif msg.type == "ai":
-                    history.append({"role": "assistant", "content": msg.content})
         import datetime
         retrieved_docs = self.vector_store._enhanced_similarity_search(
             question,
             k=max(10, settings.TOP_K_RESULTS)  # ดึงมาเยอะขึ้นนิด เพื่อเปิดทาง rerank
         )
+
 
         # 🔧 คำนวณ similarity (cosine) และเตรียมค่าไว้
         scored = []
@@ -268,8 +285,10 @@ class RAGSystem:
         avg_final = sum(d.get('final_score', 0.0) for d in filtered_docs) / max(1, len(filtered_docs))
         low_confidence = (avg_sim < 0.50) and (avg_final < 0.60)
 
+        
 
-        answer = self.llm_client.generate_response(
+
+        raw = self.llm_client.generate_response(
             question if not low_confidence else f"""\
                 คำถาม: {question}
             """,
@@ -277,9 +296,14 @@ class RAGSystem:
             history=history if use_memory else None
         )
 
+        answer = raw["answer"]
+        followups = raw["followups"] or []
+
         # ----- บันทึกคำตอบ + ไฟล์อ้างอิงจาก assistant -----
-        if use_memory and memory is not None:
+        if use_memory and session_id != "default" and session_id is not None and memory is not None:
             memory.add_ai_message(answer)
+            
+        if session_id != "default" and session_id is not None:
             msg_id_ai = self.insert_message(session_id, "assistant", answer)
 
             unique_sources = set()
@@ -317,7 +341,8 @@ class RAGSystem:
         return {
             "answer": answer,
             "sources": sources,
-            "retrieved_docs_count": len(filtered_docs)
+            "retrieved_docs_count": len(filtered_docs),
+            "followups": followups,
         }
 
     def get_chat_history(self, session_id: str = "default") -> list:
@@ -336,7 +361,6 @@ class RAGSystem:
         return history
 
     def delete_chat_history(self, session_id: str = "default"):
-        print(session_id)
         self.delete_message(session_id=session_id)
         print(f"Chat history for session '{session_id}' cleared!")
         return True

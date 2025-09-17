@@ -1,7 +1,10 @@
+import json
 import os
 import ollama
 from typing import List, Dict, Any, Optional
 import re
+
+from requests import JSONDecodeError
 from openai import OpenAI
 
 THINK_PATTERNS = [
@@ -58,19 +61,25 @@ class LlamaClient:
         context: Optional[List[Dict[str, Any]]] = None,
         history: Optional[List[dict]] = None,
         *,
-        strict_citation: bool = True,
-        ctx_budget_chars: int = 8000,   # งบตัวอักษรสำหรับ context รวม (ประมาณการง่าย ๆ)
-        per_chunk_chars: int = 1200,    # จำกัดความยาวต่อชิ้น
-        num_predict: int = 1024,        # ใช้กับ Ollama (แทน max_tokens)
-        num_ctx: int = 8192,            # context window ของโมเดล (ถ้ารองรับ)
-        temperature: float = 0.25
+        ctx_budget_chars: int = 8000,   
+        per_chunk_chars: int = 1200,    
+        num_predict: int = 4096,        
+        num_ctx: int = 8192,           
+        temperature: float = 0.3,
+        predict_followups: int = 2
     ) -> str:
+        import json
 
+        def _score(d):
+            return d.get("final_score") or d.get("rerank_score") or d.get("similarity") or (1.0 - float(d.get("distance", 1.0)))
+
+        def _citation_id(meta):
+            # ใส่ตามของเดิมคุณ
+            return meta.get("cid") or meta.get("id") or meta.get("source") or "C"
+
+        # ---------------- build context blocks ----------------
         ctx_blocks = []
         if context:
-            # เรียง context ตามคะแนนถ้ามี (final_score, rerank_score, similarity…)
-            def _score(d):
-                return d.get("final_score") or d.get("rerank_score") or d.get("similarity") or (1.0 - float(d.get("distance", 1.0)))
             sorted_ctx = sorted(context, key=_score, reverse=True)
 
             total = 0
@@ -78,14 +87,15 @@ class LlamaClient:
                 meta = d.get("metadata") or {}
                 cid = _citation_id(meta)
                 raw = d.get("content") or ""
-                # block = f"[{cid}] " + _trim_chars(raw, per_chunk_chars)
                 block = f"[{cid}] " + raw
-                # กัน context ยาวเกิน
                 if total + len(block) > ctx_budget_chars:
                     break
                 ctx_blocks.append(block)
                 total += len(block)
-        # ---------- prompts ----------
+
+        print(context)
+
+        # ---------------- original system/user prompt (UNTOUCHED) ----------------
         if ctx_blocks:
             system_prompt = (
                 "คุณเป็นผู้ช่วย RAG ที่ตอบอย่างแม่นยำ ใช้เฉพาะข้อมูลจาก CONTEXT เท่านั้น "
@@ -93,7 +103,6 @@ class LlamaClient:
                 "หาก context ไม่เพียงพอ ให้ตอบว่า 'ไม่มีข้อมูลเพียงพอ' "
                 "และอธิบายว่าขาดอะไร ห้ามเดาหรือแต่งเอง "
                 "***do not think "
-
             )
 
             user_prompt = (
@@ -101,7 +110,7 @@ class LlamaClient:
                 + "\n\n".join(ctx_blocks)
                 + "\nEND CONTEXT\n\n"
                 f"คำถาม:\n{prompt}\n\n"
-                "โปรดตอบอย่างกระชับ ตรงประเด็น"
+                "โปรดตอบให้ละเอียด ครอบคลุมทุกประเด็นในคำถาม "
             )
 
         else:
@@ -111,28 +120,42 @@ class LlamaClient:
                 "หากเป็นเพียงการทักทาย เช่น 'สวัสดี' หรือ 'ดีครับ' ให้ตอบกลับด้วยคำทักทายที่เหมาะสม "
                 "หากคำถามเป็นความรู้ทั่วไป ให้ตอบตามความรู้ที่มี "
                 "หากคำถามเป็นการขอแปลภาษา เขียนอีเมล หรือจัดรูปแบบข้อความ "
-                # "ให้ทำตามคำขอทันที โดยไม่ต้องพึ่ง context "
-                # "ทุกคำตอบที่ไม่ได้อ้างอิง context ของบริษัท ต้องระบุด้วยว่า "
-                # "'คำตอบนี้ไม่ได้อ้างอิงข้อมูลจากบริษัท เป็นเพียงความรู้ทั่วไป/การแปลข้อความ' "
                 "รายละเอียดเชิงตัวเลขหรือวันที่ล่าสุด ซึ่งคุณไม่สามารถทราบได้จากความรู้ทั่วไป "
-                "ตอบเฉพาะคำตอบสุดท้าย ไม่ต้องอธิบายขั้นตอนการคิด"
+                # "ตอบเฉพาะคำตอบสุดท้าย ไม่ต้องอธิบายขั้นตอนการคิด"
                 "***do not think "
             )
 
             user_prompt = (
                 f"คำถาม:\n{prompt}\n\n"
-                "โปรดตอบอย่างกระชับ ตรงประเด็น"
+                "โปรดตอบให้ละเอียด ครอบคลุมทุกประเด็นในคำถาม "
             )
+
+        # ---------------- ADD-ONLY: JSON + follow-ups directives ----------------
+        # (เพิ่มเข้าไปหลังจากสร้างข้อความเดิม เพื่อไม่แก้/ลบ system prompt เดิม)
+        followup_n = max(0, int(predict_followups or 0))
+        schema = '{"answer":"string","followups":[{"q":"string"}]}'
+        
+        format_directive = (
+            "รูปแบบเอาต์พุต: ตอบกลับเป็น JSON ล้วน ๆ เท่านั้น ห้ามมี Markdown/โค้ดบล็อก/คำอธิบายอื่นนอก JSON\n"
+            "ข้อกำหนดสำคัญ:\n"
+            "- คีย์ต้องมีแค่ answer (string) และ followups (array ของ object ที่มีคีย์ q เป็น string) เท่านั้น\n"
+            "- ห้ามห่อ answer เป็น object หรือมีคีย์อื่นเพิ่ม เด็ดขาด\n"
+            f"- จำนวน followups: {followup_n}\n"
+            "สคีมาที่ต้องยึด:\n" + schema + "\n"
+            "ตัวอย่างที่ถูกต้อง:\n"
+            '{"answer":"สรุปคำตอบ","followups":[{"q":"อยากให้ขยายความเรื่อง X?"},{"q":"มีตัวอย่างการใช้งานไหม?"}]}\n'
+            "ตัวอย่างที่ผิด (ห้าม):\n"
+            '{"answer":{"answer":""}}\n'
+        )
+        system_prompt = system_prompt + "\n\n" + format_directive
+        user_prompt = user_prompt + "\n\n" + format_directive
 
         messages = [{'role': 'system', 'content': system_prompt}]
         if history:
             messages.extend(history[-10:])
         messages.append({'role': 'user', 'content': user_prompt})
 
-        print(messages)
-
         try:
-            import datetime
             resp = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=messages,
@@ -140,10 +163,34 @@ class LlamaClient:
                 top_p=0.9,
                 frequency_penalty=1.1,
                 max_tokens=int(num_predict),
+                response_format={"type": "json_object"},
             )
-            return strip_think(resp.choices[0].message.content)
+            raw = resp.choices[0].message.content
+
+            try:
+                raw = strip_think(raw)
+            except Exception:
+                pass
+
+            try:
+                obj = json.loads(raw)
+            except TypeError as e:
+                print("TypeError:", type(raw), e)  
+                obj = raw if isinstance(raw, (dict, list)) else {"answer": str(raw), "followups": []}
+            except JSONDecodeError as e:
+                print("JSONDecodeError:", e) 
+                obj = {"answer": raw, "followups": []}
+
+            return obj
+
         except Exception as e:
-            return f"Error generating response: {e}"
+            # error ก็ยังคืน JSON เสมอ
+            err_obj = {
+                "answer": f"Error generating response: {e}",
+                "followups": [],
+            }
+    
+        return err_obj
 
     # ---------- optional: ฟอร์แมต context พร้อม metadata ----------
     def format_context_with_metadata(self, context: List[Dict[str, Any]]) -> str:
