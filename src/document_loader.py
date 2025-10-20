@@ -93,7 +93,6 @@ class DocumentLoader:
         all_documents = []
         
         if not os.path.exists(directory_path):
-            print(f"Directory {directory_path} does not exist")
             return all_documents
         
         for filename in os.listdir(directory_path):

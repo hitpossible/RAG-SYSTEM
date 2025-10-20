@@ -85,55 +85,18 @@ def get_system_info():
         "llm_model": info["llm_model"]
     }
 
-async def event_stream_v2(answer: str):
-    item_id = str(uuid.uuid4())
-    output_index = 0
-
-    # เปิด stream แบบ structured event format ของ Vercel AI SDK
-    yield f'data: {json.dumps({"type": "response.output_text.delta", "item_id": item_id, "delta": "🤖 "})}\n\n'
-    await asyncio.sleep(0.1)
-
-    for word in answer.split():
-        yield f'data: {json.dumps({"type": "response.output_text.delta", "item_id": item_id, "delta": word + " "})}\n\n'
-        await asyncio.sleep(0.05)
-
-    # ปิดรายการตอบกลับ
-    yield f'data: {json.dumps({"type": "response.output_item.done", "output_index": output_index, "item": {"type": "text", "text": answer}})}\n\n'
-
-    # แจ้งว่าเสร็จสิ้นทั้งหมด
-    yield f'data: {json.dumps({"type": "response.completed"})}\n\n'
-
-# --- Endpoint: Query (Streaming Response) ---
-@app.post("/query/stream/responses")
-async def query_stream(request: Request):
-    try:
-        body = await request.json()
-        input_messages = body.get("input", [])
-        question_parts = []
-
-        for msg in input_messages:
-            if msg.get("role") == "user":
-                for content in msg.get("content", []):
-                    if content.get("type") == "input_text":
-                        question_parts.append(content.get("text", ""))
-
-        question = " ".join(question_parts).strip()
-
-        if not question:
-            return JSONResponse(content={"error": "Empty input"}, status_code=400)
-
-        # ดึงคำตอบจาก model ของคุณ
-        result = rag.query(question)
-        answer = result["answer"]
-
-        return StreamingResponse(event_stream_v2(answer), media_type="text/event-stream")
-
-    except Exception as e:
-        print("Error:", e)
-        return JSONResponse(content={"error": str(e)}, status_code=500)
+@app.post("/query")
+async def query(request: QueryRequest):
+    question = (request.text or "").strip()
+    result = rag.new_query(
+        question
+    )
+    return {
+        "answer": result["answer"],
+    }
 
 # --- Endpoint: Query (Normal JSON) ---
-@app.post("/query")
+@app.post("/query_tmp")
 async def query_json(request: QueryRequest):
     import datetime
     question = (request.text or "").strip()

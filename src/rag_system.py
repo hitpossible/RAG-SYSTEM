@@ -103,6 +103,16 @@ class RAGSystem:
         finally:
             conn.close()
 
+    def new_query(self, question: str) -> dict:
+        retrieved_docs = self.vector_store._basic_similarity_search(
+            question,
+            k=max(10, settings.TOP_K_RESULTS)
+        )
+
+        result = {}
+        result["answer"] = retrieved_docs
+        return result
+
     def query(
         self,
         question: str,
@@ -372,4 +382,6 @@ class RAGSystem:
             "llm_model": settings.LLM_MODEL,
             "memory_db": self.memory_db_path
         }
+    
+
     
